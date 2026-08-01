@@ -263,3 +263,46 @@ func TestEvent_NegRiskFields(t *testing.T) {
 		t.Errorf("CompetitionState = %s, want active", e.CompetitionState)
 	}
 }
+
+func TestBuildEventsQuery_SeriesSlug(t *testing.T) {
+	q := buildEventsQuery(&EventsRequest{SeriesSlug: "btc-up-or-down-5m"})
+	if got := q.Get("series_slug"); got != "btc-up-or-down-5m" {
+		t.Errorf("series_slug = %q, want btc-up-or-down-5m", got)
+	}
+
+	if q := buildEventsQuery(&EventsRequest{}); q.Has("series_slug") {
+		t.Error("series_slug should be omitted when empty")
+	}
+}
+
+func TestEvent_EventMetadata(t *testing.T) {
+	raw := `{
+		"id": "e1",
+		"endDate": "2026-07-20T09:05:00Z",
+		"eventMetadata": {"priceToBeat": 64100.5, "finalPrice": 64250.75, "extraField": "ignored"}
+	}`
+
+	var e Event
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if e.EventMetadata == nil {
+		t.Fatal("EventMetadata is nil")
+	}
+	if got, ok := e.EventMetadata["priceToBeat"].(float64); !ok || got != 64100.5 {
+		t.Errorf("priceToBeat = %v, want 64100.5", e.EventMetadata["priceToBeat"])
+	}
+	if got, ok := e.EventMetadata["finalPrice"].(float64); !ok || got != 64250.75 {
+		t.Errorf("finalPrice = %v, want 64250.75", e.EventMetadata["finalPrice"])
+	}
+}
+
+func TestEvent_EventMetadataAbsent(t *testing.T) {
+	var e Event
+	if err := json.Unmarshal([]byte(`{"id": "e1"}`), &e); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if e.EventMetadata != nil {
+		t.Errorf("EventMetadata = %v, want nil", e.EventMetadata)
+	}
+}

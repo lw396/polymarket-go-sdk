@@ -211,6 +211,7 @@ func buildEventsQuery(req *EventsRequest) url.Values {
 	addString(q, "tag_id", req.TagID)
 	addStringSlice(q, "exclude_tag_id", req.ExcludeTagID)
 	addStringSlice(q, "slug", req.Slugs)
+	addString(q, "series_slug", req.SeriesSlug)
 	addString(q, "tag_slug", req.TagSlug)
 	addBool(q, "related_tags", req.RelatedTags)
 	addBool(q, "active", req.Active)
