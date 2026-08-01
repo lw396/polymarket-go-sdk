@@ -796,3 +796,94 @@ func TestTrade_ExpandedFields(t *testing.T) {
 		t.Errorf("FeeRateBps = %s, want 100", trade.FeeRateBps)
 	}
 }
+
+func TestOrderResponse_PostOrderFillAmounts(t *testing.T) {
+	raw := `{
+		"success": true,
+		"errorMsg": "",
+		"orderID": "0x2b6b5840f5541f0f270860cb6714ac7c272fc88776fac604ea7ef265bdc553f1",
+		"status": "matched",
+		"makingAmount": "6.00",
+		"takingAmount": "11.320754",
+		"transactionsHashes": ["0xaaa"],
+		"tradeIDs": ["trade-1", "trade-2"]
+	}`
+
+	var resp OrderResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if !resp.Success {
+		t.Error("Success = false, want true")
+	}
+	if resp.ID != "0x2b6b5840f5541f0f270860cb6714ac7c272fc88776fac604ea7ef265bdc553f1" {
+		t.Errorf("ID = %s", resp.ID)
+	}
+	if resp.Status != "matched" {
+		t.Errorf("Status = %s, want matched", resp.Status)
+	}
+	if resp.MakingAmount != "6.00" {
+		t.Errorf("MakingAmount = %q, want 6.00", resp.MakingAmount)
+	}
+	if resp.TakingAmount != "11.320754" {
+		t.Errorf("TakingAmount = %q, want 11.320754", resp.TakingAmount)
+	}
+	if len(resp.TradeIDs) != 2 || resp.TradeIDs[0] != "trade-1" {
+		t.Errorf("TradeIDs = %v, want [trade-1 trade-2]", resp.TradeIDs)
+	}
+	if len(resp.TransactionsHashes) != 1 || resp.TransactionsHashes[0] != "0xaaa" {
+		t.Errorf("TransactionsHashes = %v, want [0xaaa]", resp.TransactionsHashes)
+	}
+}
+
+func TestOrderResponse_PostOrderRejection(t *testing.T) {
+	raw := `{
+		"success": false,
+		"errorMsg": "not enough balance / allowance",
+		"orderID": "",
+		"status": "",
+		"makingAmount": "",
+		"takingAmount": ""
+	}`
+
+	var resp OrderResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if resp.Success {
+		t.Error("Success = true, want false")
+	}
+	if resp.ErrorMsg != "not enough balance / allowance" {
+		t.Errorf("ErrorMsg = %q", resp.ErrorMsg)
+	}
+	if resp.MakingAmount != "" || resp.TakingAmount != "" {
+		t.Errorf("amounts should stay empty, got %q / %q", resp.MakingAmount, resp.TakingAmount)
+	}
+}
+
+func TestOrderResponse_PostOrderNumericAmounts(t *testing.T) {
+	raw := `{"success": true, "orderID": "o-1", "status": "unmatched", "makingAmount": 0, "takingAmount": 0}`
+
+	var resp OrderResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if resp.MakingAmount != "0" || resp.TakingAmount != "0" {
+		t.Errorf("got %q / %q, want 0 / 0", resp.MakingAmount, resp.TakingAmount)
+	}
+}
+
+func TestOrderResponse_LookupShapeUnaffected(t *testing.T) {
+	raw := `{"id": "o-1", "status": "LIVE", "size_matched": "50", "price": "0.55"}`
+
+	var resp OrderResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if resp.SizeMatched != "50" || resp.Price != "0.55" {
+		t.Errorf("SizeMatched = %q, Price = %q", resp.SizeMatched, resp.Price)
+	}
+	if resp.Success || resp.ErrorMsg != "" || resp.MakingAmount != "" {
+		t.Error("POST-only fields should stay zero-valued for lookup responses")
+	}
+}
