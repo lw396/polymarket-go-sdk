@@ -51,6 +51,7 @@ graph TD
 
 - **`pkg/clob`**: The core client for REST API interactions (Orders, Markets, Account).
 - **`pkg/clob/ws`**: Robust WebSocket client with auto-reconnect and typed event channels.
+- **`pkg/polybolt`**: Opt-in authenticated crypto reference prices and 60-second TWAP, with snapshots and reconnects. See [usage and migration notes](docs/polybolt.md).
 - **`pkg/auth`**: Cryptographic primitives for EIP-712 signing and HMAC generation.
 - **`pkg/transport`**: HTTP transport layer handling signing injection, retries, and error parsing.
 - **`pkg/execution`**: Unified execution contract (`Place`/`Cancel`/`Query`/`Replay`) with CLOB adapter bindings.
