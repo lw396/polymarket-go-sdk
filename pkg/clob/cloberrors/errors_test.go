@@ -8,6 +8,22 @@ import (
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/types"
 )
 
+func TestFromTypeErrPreservesResponseEvidence(t *testing.T) {
+	original := &types.Error{Status: 400, Path: "/order", Message: `{"error":"no orders found to match with FAK order"}`}
+	mapped := FromTypeErr(original)
+	if !errors.Is(mapped, sdkerrors.ErrBadRequest) {
+		t.Fatal("mapped sentinel was lost")
+	}
+	response, ok := errors.AsType[*types.Error](mapped)
+	if !ok || response != original || !errors.Is(mapped, original) {
+		t.Fatalf("mapped HTTP response evidence was lost: %v", mapped)
+	}
+	wantMessage := sdkerrors.ErrBadRequest.Error() + ": " + original.Message
+	if mapped.Error() != wantMessage {
+		t.Fatalf("error presentation changed: %q", mapped.Error())
+	}
+}
+
 func TestFromTypeErr_NilError(t *testing.T) {
 	result := FromTypeErr(nil)
 	if result != nil {

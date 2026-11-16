@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/clob/clobtypes"
+	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/transport"
 )
 
 func (c *clientImpl) Markets(ctx context.Context, req *clobtypes.MarketsRequest) (clobtypes.MarketsResponse, error) {
@@ -290,12 +291,19 @@ func (c *clientImpl) TickSize(ctx context.Context, req *clobtypes.TickSizeReques
 		c.cache.mu.RLock()
 		if cached, ok := c.cache.tickSizes[req.TokenID]; ok && cached != 0 {
 			c.cache.mu.RUnlock()
+			transport.RecordTickCache(ctx, true)
 			return clobtypes.TickSizeResponse{MinimumTickSize: cached}, nil
 		}
 		c.cache.mu.RUnlock()
 	}
+	transport.RecordTickCache(ctx, false)
 	var resp clobtypes.TickSizeResponse
-	err := c.httpClient.Get(ctx, "/tick-size", q, &resp)
+	// Tick metadata is public. Keep validation/cache behavior, but avoid an
+	// unnecessary L2 signature and /time round trip on this cold-token lookup.
+	// Clone rather than mutating the authenticated order/account transport.
+	publicHTTP := c.httpClient.Clone()
+	publicHTTP.SetAuth(nil, nil)
+	err := publicHTTP.Get(ctx, "/tick-size", q, &resp)
 	if err == nil && req != nil && req.TokenID != "" && c.cache != nil {
 		tickSize := resp.MinimumTickSize
 		if tickSize == 0 {
@@ -315,12 +323,16 @@ func (c *clientImpl) TickSizeByPath(ctx context.Context, tokenID string) (clobty
 		c.cache.mu.RLock()
 		if cached, ok := c.cache.tickSizes[tokenID]; ok && cached != 0 {
 			c.cache.mu.RUnlock()
+			transport.RecordTickCache(ctx, true)
 			return clobtypes.TickSizeResponse{MinimumTickSize: cached}, nil
 		}
 		c.cache.mu.RUnlock()
 	}
+	transport.RecordTickCache(ctx, false)
 	var resp clobtypes.TickSizeResponse
-	err := c.httpClient.Get(ctx, fmt.Sprintf("/tick-size/%s", tokenID), nil, &resp)
+	publicHTTP := c.httpClient.Clone()
+	publicHTTP.SetAuth(nil, nil)
+	err := publicHTTP.Get(ctx, fmt.Sprintf("/tick-size/%s", tokenID), nil, &resp)
 	if err == nil && tokenID != "" && c.cache != nil {
 		tickSize := resp.MinimumTickSize
 		if tickSize == 0 {

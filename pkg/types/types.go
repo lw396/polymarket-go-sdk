@@ -34,6 +34,11 @@ type Error struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 	Path    string `json:"path,omitempty"`
+	// Transport-only evidence: never trust or serialize these from API JSON.
+	// ResponseBody is the complete outer response, not the decoded Message field.
+	ResponseBody           string `json:"-"`
+	RequestAttempts        int    `json:"-"`
+	ResponseRequestMatched bool   `json:"-"`
 }
 
 func (e *Error) Error() string {

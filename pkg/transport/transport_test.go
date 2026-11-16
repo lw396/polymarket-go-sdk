@@ -2,12 +2,14 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/types"
@@ -22,6 +24,119 @@ type MockDoer struct {
 func (m *MockDoer) Do(req *http.Request) (*http.Response, error) {
 	m.calls = append(m.calls, req)
 	return m.DoFunc(req)
+}
+
+func TestClientErrorRetainsRawResponseAndActualRequestCount(t *testing.T) {
+	for _, tt := range []struct {
+		name, body   string
+		firstFailure bool
+	}{
+		{"raw fallback", `{"error":"no match"}`, false},
+		{"structured message", `{"message":"inner","success":true,"orderID":"other"}`, false},
+		{"retry evidence", `{"error":"no match"}`, true},
+		{"untrusted metadata ignored", `{"message":"bad request","status":200,"path":"/forged","ResponseBody":"forged","RequestAttempts":1}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				requests := 0
+				mock := &MockDoer{DoFunc: func(req *http.Request) (*http.Response, error) {
+					requests++
+					status := http.StatusBadRequest
+					if tt.firstFailure && requests == 1 {
+						status = http.StatusInternalServerError
+					}
+					return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(tt.body)), Request: req}, nil
+				}}
+				client := NewClient(mock, "http://synthetic.invalid")
+				err := client.Call(t.Context(), http.MethodPost, "/order", nil, nil, nil, nil)
+				response, ok := errors.AsType[*types.Error](err)
+				if !ok || response.ResponseBody != tt.body || response.RequestAttempts != requests || response.Status != 400 || response.Path != "/order" || response.ResponseRequestMatched {
+					t.Fatalf("raw response/attempt provenance lost: %+v error=%v", response, err)
+				}
+				if (requests == 2) != tt.firstFailure {
+					t.Fatalf("request count=%d firstFailure=%v", requests, tt.firstFailure)
+				}
+				encoded, err := json.Marshal(response)
+				if err != nil || strings.Contains(string(encoded), "ResponseBody") || strings.Contains(string(encoded), "RequestAttempts") || strings.Contains(string(encoded), "ResponseRequestMatched") {
+					t.Fatal("transport-only evidence was serialized")
+				}
+			})
+		})
+	}
+}
+
+func TestResponseProvenanceAllowsDeadlineCloneButNotRedirectOrReplay(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://synthetic.invalid/order", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := request.Clone(t.Context())
+	sameURLRedirect := request.Clone(t.Context())
+	sameURLRedirect.Response = &http.Response{StatusCode: http.StatusTemporaryRedirect}
+	redirect := request.Clone(t.Context())
+	redirect.URL.Path = "/other"
+	methodChanged := request.Clone(t.Context())
+	methodChanged.Method = http.MethodGet
+	for _, tt := range []struct {
+		name            string
+		responseRequest *http.Request
+		writes          int32
+		want            bool
+	}{
+		{"direct doer", request, 0, true},
+		{"deadline clone", clone, 1, true},
+		{"same URL redirect with pending trace callback", sameURLRedirect, 1, false},
+		{"unproven clone", clone, 0, false},
+		{"replayed same request", request, 2, false},
+		{"replayed clone", clone, 2, false},
+		{"redirected URL", redirect, 1, false},
+		{"redirected method", methodChanged, 1, false},
+		{"missing provenance", nil, 1, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := responseMatchesRequest(request, &http.Response{Request: tt.responseRequest}, tt.writes)
+			if got != tt.want {
+				t.Fatalf("matched=%v want=%v", got, tt.want)
+			}
+		})
+	}
+}
+
+type proofRoundTripper struct{}
+
+func (proofRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("provenance test must not execute HTTP")
+}
+
+func TestOrderResponseProofExcludesOpaqueReplayPolicies(t *testing.T) {
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://synthetic.invalid/order", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name string
+		doer Doer
+		want bool
+	}{
+		{"standard default transport", &http.Client{Timeout: 30 * time.Second}, true},
+		{"standard explicit transport", &http.Client{Transport: &http.Transport{}}, true},
+		{"opaque doer", &MockDoer{}, false},
+		{"opaque roundtripper", &http.Client{Transport: proofRoundTripper{}}, false},
+		{"custom redirect hook", &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if standardNonReplayOrderClient(tt.doer, request) != tt.want {
+				t.Fatal("opaque client replay/redirect policy was trusted")
+			}
+		})
+	}
+	for _, header := range []string{"Idempotency-Key", "X-Idempotency-Key"} {
+		clone := request.Clone(t.Context())
+		clone.Header[header] = nil // Header presence, not value, opts into replay.
+		if standardNonReplayOrderClient(&http.Client{}, clone) {
+			t.Fatal("idempotency opt-in was trusted as a single wire request")
+		}
+	}
 }
 
 func TestClient_Call_Retry(t *testing.T) {

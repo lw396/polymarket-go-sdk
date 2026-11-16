@@ -11,6 +11,7 @@ import (
 
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/auth"
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/clob/clobtypes"
+	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/transport"
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/types"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -25,7 +26,9 @@ func (c *clientImpl) CreateOrder(ctx context.Context, order *clobtypes.Order) (c
 }
 
 func (c *clientImpl) CreateOrderWithOptions(ctx context.Context, order *clobtypes.Order, opts *clobtypes.OrderOptions) (clobtypes.OrderResponse, error) {
+	signingStarted := time.Now()
 	signed, err := c.signOrder(order)
+	transport.RecordOrderSigning(ctx, time.Since(signingStarted))
 	if err != nil {
 		return clobtypes.OrderResponse{}, err
 	}

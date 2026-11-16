@@ -12,9 +12,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/auth"
@@ -230,6 +232,7 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 	}
 
 	var lastErr error
+	requestAttempts := 0
 	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff: 100ms, 200ms, 400ms...
@@ -309,15 +312,29 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 			}
 		}
 
+		// A normal http.Client timeout clones requests; pointer identity alone
+		// cannot prove provenance. Count actual order writes as well, so redirects
+		// and transport-level replays cannot masquerade as one clean submission.
+		var wireRequests atomic.Int32
+		if method == http.MethodPost && path == "/order" {
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+				WroteRequest: func(httptrace.WroteRequestInfo) { wireRequests.Add(1) },
+			}))
+		}
+		requestAttempts++
+		req, finishHTTP := observeOrderHTTP(req, path, attempt+1)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			finishHTTP(0, false, -1)
 			lastErr = fmt.Errorf("request failed: %w", err)
 			continue
 		}
 
 		// Read response body
+		bodyStarted := time.Now()
 		respBytes, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		finishHTTP(resp.StatusCode, readErr == nil, time.Since(bodyStarted))
 		if readErr != nil {
 			lastErr = fmt.Errorf("failed to read response body: %w", readErr)
 			continue
@@ -335,13 +352,19 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 			if err := json.Unmarshal(respBytes, &apiErr); err == nil && (apiErr.Message != "" || apiErr.Code != "") {
 				apiErr.Status = resp.StatusCode
 				apiErr.Path = path
+				apiErr.ResponseBody = string(respBytes)
+				apiErr.RequestAttempts = requestAttempts
+				apiErr.ResponseRequestMatched = standardNonReplayOrderClient(c.httpClient, req) && responseMatchesRequest(req, resp, wireRequests.Load())
 				return &apiErr
 			}
 			// Fallback for unknown error formats
 			return &types.Error{
-				Status:  resp.StatusCode,
-				Message: string(respBytes),
-				Path:    path,
+				Status:                 resp.StatusCode,
+				Message:                string(respBytes),
+				Path:                   path,
+				ResponseBody:           string(respBytes),
+				RequestAttempts:        requestAttempts,
+				ResponseRequestMatched: standardNonReplayOrderClient(c.httpClient, req) && responseMatchesRequest(req, resp, wireRequests.Load()),
 			}
 		}
 
@@ -358,6 +381,43 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 	return lastErr
 }
 
+// Proof is limited to the stdlib non-idempotent POST behavior. Custom Doers,
+// redirect hooks and idempotency opt-ins may hide extra submissions, so they
+// never certify a business rejection even if their final response looks valid.
+func standardNonReplayOrderClient(doer Doer, request *http.Request) bool {
+	client, ok := doer.(*http.Client)
+	if !ok || client.CheckRedirect != nil || request.Method != http.MethodPost || request.URL.Path != "/order" {
+		return false
+	}
+	if _, ok := request.Header["Idempotency-Key"]; ok {
+		return false
+	}
+	if _, ok := request.Header["X-Idempotency-Key"]; ok {
+		return false
+	}
+	roundTripper := client.Transport
+	if roundTripper == nil {
+		roundTripper = http.DefaultTransport
+	}
+	_, ok = roundTripper.(*http.Transport)
+	return ok
+}
+
+func responseMatchesRequest(request *http.Request, response *http.Response, wireRequests int32) bool {
+	// Request.Response is the stdlib's retained preceding redirect response,
+	// including a redirect back to the same URL. Check it independently of
+	// trace callback timing: a WroteRequest count need not be final at return.
+	if response.Request == nil || response.Request.Response != nil || wireRequests > 1 {
+		return false
+	}
+	if response.Request == request {
+		return true
+	}
+	// Accept the stdlib's deadline/header clone only when the trace proves one
+	// wire request and the response names the same method and complete URL.
+	return wireRequests == 1 && response.Request.Method == request.Method && response.Request.URL != nil && request.URL != nil && response.Request.URL.String() == request.URL.String()
+}
+
 func (c *Client) serverTime(ctx context.Context) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -369,13 +429,17 @@ func (c *Client) serverTime(ctx context.Context) (int64, error) {
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
 
+	req, finishHTTP := observeOrderHTTP(req, "/time", 1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		finishHTTP(0, false, -1)
 		return 0, fmt.Errorf("server time request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	bodyStarted := time.Now()
 	body, err := io.ReadAll(resp.Body)
+	finishHTTP(resp.StatusCode, err == nil, time.Since(bodyStarted))
 	if err != nil {
 		return 0, fmt.Errorf("read server time response: %w", err)
 	}

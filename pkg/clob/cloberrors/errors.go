@@ -4,6 +4,7 @@
 package cloberrors
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,12 +12,40 @@ import (
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/types"
 )
 
+type mappedResponseError struct {
+	mapped   error
+	response *types.Error
+}
+
+func (e *mappedResponseError) Error() string { return e.mapped.Error() }
+
+func (e *mappedResponseError) Unwrap() error { return e.mapped }
+
+func (e *mappedResponseError) Is(target error) bool {
+	return errors.Is(e.response, target)
+}
+
+func (e *mappedResponseError) As(target any) bool {
+	if response, ok := target.(**types.Error); ok {
+		*response = e.response
+		return true
+	}
+	return false
+}
+
 // FromTypeErr maps a generic types.Error (from transport layer) to a specific
 // structured error type from pkg/errors.
-func FromTypeErr(err *types.Error) error {
+func FromTypeErr(err *types.Error) (result error) {
 	if err == nil {
 		return nil
 	}
+	// Keep the existing mapped sentinel and human-readable message, but retain
+	// the transport's complete status/path/code evidence for safe classification.
+	defer func() {
+		if err.Status == 400 && result != nil && !errors.Is(result, err) {
+			result = &mappedResponseError{mapped: result, response: err}
+		}
+	}()
 
 	// Map by Code if available (most reliable)
 	code := strings.ToUpper(err.Code)

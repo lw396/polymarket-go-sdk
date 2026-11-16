@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/auth"
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/clob/clobtypes"
 	"github.com/GoPolymarket/polymarket-go-sdk/v2/pkg/transport"
 )
@@ -57,6 +59,58 @@ func (d *assertBodyDoer) Do(req *http.Request) (*http.Response, error) {
 		Header:     make(http.Header),
 	}
 	return resp, nil
+}
+
+type metadataDoer func(*http.Request) (*http.Response, error)
+
+func (f metadataDoer) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestTickMetadataIsPublicButAccountAuthenticationIsPreserved(t *testing.T) {
+	calls := make(map[string]int)
+	doer := metadataDoer(func(req *http.Request) (*http.Response, error) {
+		calls[req.URL.Path]++
+		body := `{"minimum_tick_size":0.01}`
+		switch req.URL.Path {
+		case "/tick-size", "/tick-size/456":
+			for _, header := range []string{auth.HeaderPolySignature, auth.HeaderPolyAPIKey, auth.HeaderPolyPassphrase, auth.HeaderPolyAddress, auth.HeaderPolyTimestamp} {
+				if req.Header.Get(header) != "" {
+					t.Error("public metadata carried an unnecessary authentication header")
+				}
+			}
+		case "/time":
+			body = `1794798600`
+		case "/balance-allowance":
+			if req.Header.Get(auth.HeaderPolySignature) == "" || req.Header.Get(auth.HeaderPolyTimestamp) != "1794798600" {
+				t.Error("account request lost server-time authentication")
+			}
+			body = `{"balance":"1000000"}`
+		default:
+			t.Errorf("unexpected synthetic metadata path %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})
+	httpClient := transport.NewClient(doer, "http://synthetic.invalid")
+	httpClient.SetUseServerTime(true)
+	client := NewClient(httpClient).WithAuth(mustSigner(t), &auth.APIKey{Key: "synthetic", Secret: "c3ludGhldGlj", Passphrase: "synthetic"})
+	for range 2 {
+		if _, err := client.TickSize(t.Context(), &clobtypes.TickSizeRequest{TokenID: "123"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.TickSizeByPath(t.Context(), "456"); err != nil {
+		t.Fatal(err)
+	}
+	if calls["/time"] != 0 || calls["/tick-size"] != 1 || calls["/tick-size/456"] != 1 {
+		t.Fatalf("metadata cache/auth request budget changed: %v", calls)
+	}
+	if _, err := client.BalanceAllowance(t.Context(), &clobtypes.BalanceAllowanceRequest{AssetType: clobtypes.AssetTypeCollateral}); err != nil {
+		t.Fatal(err)
+	}
+	if calls["/time"] != 1 {
+		t.Fatalf("authenticated account server time calls=%d, want1", calls["/time"])
+	}
 }
 
 func TestMarketMethods(t *testing.T) {
