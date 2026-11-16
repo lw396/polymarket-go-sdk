@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,12 +27,22 @@ func (b *OrderBuilder) resolveTickSize(ctx context.Context, tokenID string) (dec
 	if hasClient {
 		resp, err := b.client.TickSize(ctx, &clobtypes.TickSizeRequest{TokenID: tokenID})
 		if err != nil {
+			if errors.Is(err, errTickSizeCacheChanged) || b.requireTickSizeLookup {
+				return decimal.Decimal{}, fmt.Errorf("tick size lookup failed: %w", err)
+			}
 			if override != nil {
 				return *override, nil
 			}
 			return decimal.Decimal{}, fmt.Errorf("tick size lookup failed: %w", err)
 		}
-		minTick := decimal.NewFromFloat(resp.MinimumTickSize)
+		minimum := resp.MinimumTickSize
+		if minimum == 0 {
+			minimum = resp.TickSize
+		}
+		if b.requireTickSizeLookup && (math.IsNaN(minimum) || math.IsInf(minimum, 0) || minimum <= 0 || minimum >= 1) {
+			return decimal.Decimal{}, fmt.Errorf("invalid tick size metadata")
+		}
+		minTick := decimal.NewFromFloat(minimum)
 
 		if override != nil {
 			if override.Cmp(minTick) < 0 {

@@ -2,6 +2,7 @@ package clob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -282,13 +283,43 @@ func (c *clientImpl) LastTradesPricesQuery(ctx context.Context, req *clobtypes.L
 	return resp, mapError(err)
 }
 
+var errTickSizeCacheChanged = errors.New("tick size cache changed during request")
+
+// commitTickSize never returns metadata superseded by a cache mutation.
+func (cache *clientCache) commitTickSize(tokenID string, generation uint64, resp clobtypes.TickSizeResponse) (clobtypes.TickSizeResponse, error) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.tickGeneration != generation {
+		if tick := cache.tickSizes[tokenID]; tick != 0 {
+			return clobtypes.TickSizeResponse{MinimumTickSize: tick}, nil
+		}
+		return clobtypes.TickSizeResponse{}, errTickSizeCacheChanged
+	}
+	// Another ordinary lookup may have filled this same token meanwhile.
+	// Keep its cached result; unrelated cold-token fills must not invalidate
+	// each other. Only explicit updates/invalidation advance tickGeneration.
+	if cached := cache.tickSizes[tokenID]; cached != 0 {
+		return clobtypes.TickSizeResponse{MinimumTickSize: cached}, nil
+	}
+	tick := resp.MinimumTickSize
+	if tick == 0 {
+		tick = resp.TickSize
+	}
+	if tick != 0 {
+		cache.tickSizes[tokenID] = tick
+	}
+	return resp, nil
+}
+
 func (c *clientImpl) TickSize(ctx context.Context, req *clobtypes.TickSizeRequest) (clobtypes.TickSizeResponse, error) {
 	q := url.Values{}
 	if req != nil {
 		q.Set("token_id", req.TokenID)
 	}
+	var generation uint64
 	if req != nil && req.TokenID != "" && c.cache != nil {
 		c.cache.mu.RLock()
+		generation = c.cache.tickGeneration
 		if cached, ok := c.cache.tickSizes[req.TokenID]; ok && cached != 0 {
 			c.cache.mu.RUnlock()
 			transport.RecordTickCache(ctx, true)
@@ -305,22 +336,16 @@ func (c *clientImpl) TickSize(ctx context.Context, req *clobtypes.TickSizeReques
 	publicHTTP.SetAuth(nil, nil)
 	err := publicHTTP.Get(ctx, "/tick-size", q, &resp)
 	if err == nil && req != nil && req.TokenID != "" && c.cache != nil {
-		tickSize := resp.MinimumTickSize
-		if tickSize == 0 {
-			tickSize = resp.TickSize
-		}
-		if tickSize != 0 {
-			c.cache.mu.Lock()
-			c.cache.tickSizes[req.TokenID] = tickSize
-			c.cache.mu.Unlock()
-		}
+		return c.cache.commitTickSize(req.TokenID, generation, resp)
 	}
 	return resp, mapError(err)
 }
 
 func (c *clientImpl) TickSizeByPath(ctx context.Context, tokenID string) (clobtypes.TickSizeResponse, error) {
+	var generation uint64
 	if tokenID != "" && c.cache != nil {
 		c.cache.mu.RLock()
+		generation = c.cache.tickGeneration
 		if cached, ok := c.cache.tickSizes[tokenID]; ok && cached != 0 {
 			c.cache.mu.RUnlock()
 			transport.RecordTickCache(ctx, true)
@@ -334,15 +359,7 @@ func (c *clientImpl) TickSizeByPath(ctx context.Context, tokenID string) (clobty
 	publicHTTP.SetAuth(nil, nil)
 	err := publicHTTP.Get(ctx, fmt.Sprintf("/tick-size/%s", tokenID), nil, &resp)
 	if err == nil && tokenID != "" && c.cache != nil {
-		tickSize := resp.MinimumTickSize
-		if tickSize == 0 {
-			tickSize = resp.TickSize
-		}
-		if tickSize != 0 {
-			c.cache.mu.Lock()
-			c.cache.tickSizes[tokenID] = tickSize
-			c.cache.mu.Unlock()
-		}
+		return c.cache.commitTickSize(tokenID, generation, resp)
 	}
 	return resp, mapError(err)
 }

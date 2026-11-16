@@ -20,12 +20,13 @@ type OrderBuilder struct {
 	client Client
 	signer auth.Signer
 
-	tokenID   string
-	side      string
-	price     decimal.Decimal
-	size      decimal.Decimal
-	tickSize  float64
-	orderType clobtypes.OrderType
+	tokenID               string
+	side                  string
+	price                 decimal.Decimal
+	size                  decimal.Decimal
+	tickSize              float64
+	requireTickSizeLookup bool
+	orderType             clobtypes.OrderType
 
 	// Optional overrides
 	maker         *common.Address
@@ -119,6 +120,13 @@ func (b *OrderBuilder) SizeDec(size decimal.Decimal) *OrderBuilder {
 // TickSize sets a manual tick size override (e.g. "0.01").
 func (b *OrderBuilder) TickSize(tickSize float64) *OrderBuilder {
 	b.tickSize = tickSize
+	return b
+}
+
+// RequireTickSizeLookup disables manual tick fallback on lookup errors when the
+// client has a transport. Offline builders may still use a manual tick size.
+func (b *OrderBuilder) RequireTickSizeLookup() *OrderBuilder {
+	b.requireTickSizeLookup = true
 	return b
 }
 

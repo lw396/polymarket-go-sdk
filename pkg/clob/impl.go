@@ -40,10 +40,11 @@ type clientImpl struct {
 }
 
 type clientCache struct {
-	mu        sync.RWMutex
-	tickSizes map[string]float64
-	feeRates  map[string]int64
-	negRisk   map[string]bool
+	mu             sync.RWMutex
+	tickGeneration uint64 // Protected by mu; invalidates pending tick lookups.
+	tickSizes      map[string]float64
+	feeRates       map[string]int64
+	negRisk        map[string]bool
 }
 
 type orderDefaults struct {
@@ -447,6 +448,7 @@ func (c *clientImpl) InvalidateCaches() {
 		return
 	}
 	c.cache.mu.Lock()
+	c.cache.tickGeneration++
 	c.cache.tickSizes = make(map[string]float64)
 	c.cache.feeRates = make(map[string]int64)
 	c.cache.negRisk = make(map[string]bool)
@@ -458,7 +460,12 @@ func (c *clientImpl) SetTickSize(tokenID string, tickSize float64) {
 		return
 	}
 	c.cache.mu.Lock()
-	c.cache.tickSizes[tokenID] = tickSize
+	c.cache.tickGeneration++
+	if tickSize == 0 {
+		delete(c.cache.tickSizes, tokenID)
+	} else {
+		c.cache.tickSizes[tokenID] = tickSize
+	}
 	c.cache.mu.Unlock()
 }
 

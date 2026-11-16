@@ -113,6 +113,82 @@ func TestTickMetadataIsPublicButAccountAuthenticationIsPreserved(t *testing.T) {
 	}
 }
 
+func TestTickSizePendingResponseCacheMutation(t *testing.T) {
+	getters := map[string]func(Client, context.Context, string) (clobtypes.TickSizeResponse, error){
+		"query": func(c Client, ctx context.Context, token string) (clobtypes.TickSizeResponse, error) {
+			return c.TickSize(ctx, &clobtypes.TickSizeRequest{TokenID: token})
+		},
+		"path": func(c Client, ctx context.Context, token string) (clobtypes.TickSizeResponse, error) {
+			return c.TickSizeByPath(ctx, token)
+		},
+	}
+	for name, get := range getters {
+		for _, mutation := range []string{"update", "zero", "update-then-zero", "invalidate", "other-token"} {
+			t.Run(name+"/"+mutation, func(t *testing.T) {
+				started, release := make(chan struct{}), make(chan struct{})
+				doer := metadataDoer(func(req *http.Request) (*http.Response, error) {
+					close(started)
+					<-release
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"minimum_tick_size":0.01}`)), Header: make(http.Header), Request: req}, nil
+				})
+				c := NewClient(transport.NewClient(doer, "http://synthetic.invalid")).(*clientImpl)
+				c.SetTickSize("other", 0.1)
+				type result struct {
+					resp clobtypes.TickSizeResponse
+					err  error
+				}
+				done := make(chan result, 1)
+				go func() {
+					resp, err := get(c, t.Context(), "token")
+					done <- result{resp, err}
+				}()
+				<-started
+				switch mutation {
+				case "update":
+					c.SetTickSize("token", 0.001)
+				case "zero":
+					c.SetTickSize("token", 0)
+				case "update-then-zero":
+					c.SetTickSize("token", 0.001)
+					c.SetTickSize("token", 0)
+				case "invalidate":
+					c.InvalidateCaches()
+				case "other-token":
+					c.SetTickSize("other", 0.001)
+				}
+				close(release)
+				got := <-done
+				if mutation == "update" {
+					if got.err != nil || got.resp.MinimumTickSize != 0.001 {
+						t.Errorf("pending lookup = %+v, %v; want newer cached tick", got.resp, got.err)
+					}
+					// Both getters must see the newer tick without another request.
+					for _, cachedGet := range getters {
+						resp, err := cachedGet(c, t.Context(), "token")
+						if err != nil || resp.MinimumTickSize != 0.001 {
+							t.Errorf("cached lookup = %+v, %v", resp, err)
+						}
+					}
+				} else if got.err == nil || got.err.Error() != "tick size cache changed during request" || got.resp != (clobtypes.TickSizeResponse{}) {
+					t.Errorf("pending lookup = %+v, %v; want zero response and local cache-changed error", got.resp, got.err)
+				}
+				c.cache.mu.RLock()
+				defer c.cache.mu.RUnlock()
+				if tick, ok := c.cache.tickSizes["token"]; mutation == "update" {
+					if !ok || tick != 0.001 {
+						t.Errorf("newer cached tick overwritten: %v, %v", tick, ok)
+					}
+				} else if ok {
+					t.Errorf("stale tick resurrected: %v", tick)
+				}
+				if (mutation == "zero" || mutation == "update-then-zero") && c.cache.tickSizes["other"] != 0.1 {
+					t.Error("per-token invalidation removed another token")
+				}
+			})
+		}
+	}
+}
+
 func TestMarketMethods(t *testing.T) {
 	doer := &staticDoer{
 		responses: map[string]string{
