@@ -40,16 +40,17 @@ type Doer interface {
 // It adds Polymarket-specific functionality like automatic HMAC signing
 // and transparent request retries for ephemeral server errors.
 type Client struct {
-	httpClient     Doer
-	baseURL        string
-	userAgent      string
-	signer         auth.Signer
-	apiKey         *auth.APIKey
-	builder        *auth.BuilderConfig
-	useServerTime  bool
-	authClock      *AuthClock // Optional, caller-owned server-time overlay.
-	rateLimiter    *RateLimiter
-	circuitBreaker *CircuitBreaker
+	httpClient          Doer
+	baseURL             string
+	userAgent           string
+	signer              auth.Signer
+	apiKey              *auth.APIKey
+	builder             *auth.BuilderConfig
+	useServerTime       bool
+	authClock           *AuthClock // Optional, caller-owned calibrated server clock.
+	authClockConfigured bool       // Retain strictness if a clone cannot share the clock.
+	rateLimiter         *RateLimiter
+	circuitBreaker      *CircuitBreaker
 }
 
 // NewClient creates a new transport client.
@@ -112,9 +113,10 @@ func (c *Client) CloneWithBaseURL(baseURL string) *Client {
 	clone := NewClient(c.httpClient, baseURL)
 	clone.userAgent = c.userAgent
 	clone.useServerTime = c.useServerTime
+	clone.authClockConfigured = c.authClockConfigured
 	if c.authClock != nil {
-		// Cross-origin/closed clones keep live server time, never another
-		// origin's calibration. Transport clones do not own Close.
+		// Cross-origin/closed clones retain strictness but not an unusable
+		// calibration. They fail closed instead of silently fetching time.
 		clone.authClock, _ = c.authClock.CloneForOrigin(baseURL)
 	}
 	clone.signer = c.signer
@@ -279,6 +281,14 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 		if c.apiKey != nil && c.signer != nil && req.Header.Get(auth.HeaderPolySignature) == "" {
 			ts, err := c.authTimestamp(ctx)
 			if err != nil {
+				if c.authClockConfigured {
+					if requestAttempts == 0 {
+						return &AuthClockNotReadyError{cause: err}
+					}
+					// An earlier HTTP attempt may already have matched. Do not
+					// certify no-send or add a fallback/replay to hide this error.
+					return fmt.Errorf("auth clock unavailable after earlier request attempt: %w", err)
+				}
 				lastErr = fmt.Errorf("failed to get server time: %w", err)
 				continue
 			}

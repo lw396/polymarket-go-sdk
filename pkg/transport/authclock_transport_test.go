@@ -36,39 +36,67 @@ func authenticatedClockTransport(t *testing.T, rt authClockRoundTrip) *Client {
 }
 
 func TestTransportAuthClockStrictCacheAndClone(t *testing.T) {
- synctest.Test(t,func(t *testing.T){
-  times,posts:=0,0
-  c:=authenticatedClockTransport(t,func(r *http.Request)(*http.Response,error){
-   if r.URL.Path=="/time" {
-    times++;if r.Header.Get(auth.HeaderPolySignature)!=""||r.Header.Get(auth.HeaderPolyAPIKey)!=""{t.Fatal("public time carried credentials")}
-    return authClockResponse(r,200,strconv.FormatInt(time.Now().Unix(),10)),nil
-   }
-   posts++
-   var body []byte;if r.Body!=nil{body,_=io.ReadAll(r.Body)}
-   signature,err:=auth.SignHMAC("c3ludGhldGlj",r.Header.Get(auth.HeaderPolyTimestamp)+"POST/order"+strings.ReplaceAll(string(body),"'","\""))
-   if err!=nil||signature!=r.Header.Get(auth.HeaderPolySignature){t.Fatal("HMAC/body changed")}
-   return authClockResponse(r,200,`{}`),nil
-  })
-  clock,err:=c.NewServerAuthClock(testAuthClockPolicy());if err!=nil{t.Fatal(err)};defer clock.Close()
-  if err:=c.SetAuthClock(clock);err!=nil{t.Fatal(err)}
-  ctx,collector:=WithOrderDiagnostics(t.Context())
-  assertNoSend:=func(client *Client){
-   t.Helper()
-   err:=client.Post(ctx,"/order",nil,nil)
-   if _,ok:=errors.AsType[*AuthClockNotReadyError](err);!ok {t.Fatalf("missing local no-send proof: %v",err)}
-  }
-  assertNoSend(c)
-  if times!=0||posts!=0 {t.Fatal("cold clock fetched time or posted")}
-  if err:=clock.Refresh(t.Context());err!=nil{t.Fatal(err)}
-  clone:=c.Clone()
-  for _,client:=range []*Client{c,clone}{if err:=client.Post(ctx,"/order",map[string]string{"test":"exact-body"},nil);err!=nil{t.Fatal(err)}}
-  assertNoSend(c.CloneWithBaseURL("https://different.example.invalid"))
-  time.Sleep(6*time.Second)
-  assertNoSend(clone)
-  if times!=1||posts!=2{t.Fatal("unusable clock fell back or retried")}
-  snapshot:=collector.Finish()
-  if len(snapshot.AuthTime)!=5||snapshot.AuthTime[0].Source!="clock_unavailable"||snapshot.AuthTime[1].Source!="calibrated"||snapshot.AuthTime[4].Source!="clock_unavailable"{t.Fatal("missing clock evidence")}
- })
+	synctest.Test(t, func(t *testing.T) {
+		times, posts := 0, 0
+		c := authenticatedClockTransport(t, func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path == "/time" {
+				times++
+				if r.Header.Get(auth.HeaderPolySignature) != "" || r.Header.Get(auth.HeaderPolyAPIKey) != "" {
+					t.Fatal("public time carried credentials")
+				}
+				return authClockResponse(r, 200, strconv.FormatInt(time.Now().Unix(), 10)), nil
+			}
+			posts++
+			var body []byte
+			if r.Body != nil {
+				body, _ = io.ReadAll(r.Body)
+			}
+			signature, err := auth.SignHMAC("c3ludGhldGlj", r.Header.Get(auth.HeaderPolyTimestamp)+"POST/order"+strings.ReplaceAll(string(body), "'", "\""))
+			if err != nil || signature != r.Header.Get(auth.HeaderPolySignature) {
+				t.Fatal("HMAC/body changed")
+			}
+			return authClockResponse(r, 200, `{}`), nil
+		})
+		clock, err := c.NewServerAuthClock(testAuthClockPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clock.Close()
+		if err := c.SetAuthClock(clock); err != nil {
+			t.Fatal(err)
+		}
+		ctx, collector := WithOrderDiagnostics(t.Context())
+		assertNoSend := func(client *Client) {
+			t.Helper()
+			err := client.Post(ctx, "/order", nil, nil)
+			if _, ok := errors.AsType[*AuthClockNotReadyError](err); !ok {
+				t.Fatalf("missing local no-send proof: %v", err)
+			}
+		}
+		assertNoSend(c)
+		if times != 0 || posts != 0 {
+			t.Fatal("cold clock fetched time or posted")
+		}
+		if err := clock.Refresh(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		clone := c.Clone()
+		for _, client := range []*Client{c, clone} {
+			if err := client.Post(ctx, "/order", map[string]string{"test": "exact-body"}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		assertNoSend(c.CloneWithBaseURL("https://different.example.invalid"))
+		time.Sleep(6 * time.Second)
+		assertNoSend(clone)
+		if times != 1 || posts != 2 {
+			t.Fatal("unusable clock fell back or retried")
+		}
+		snapshot := collector.Finish()
+		if len(snapshot.AuthTime) != 5 || snapshot.AuthTime[0].Source != "clock_unavailable" || snapshot.AuthTime[1].Source != "calibrated" || snapshot.AuthTime[4].Source != "clock_unavailable" {
+			t.Fatal("missing clock evidence")
+		}
+	})
 }
 
 func TestTransportAuthClock401NeverReplays(t *testing.T) {
@@ -103,23 +131,41 @@ func TestTransportAuthClock401NeverReplays(t *testing.T) {
 }
 
 func TestTransportAuthClockFailureAfterPriorAttemptRemainsUnknown(t *testing.T) {
- synctest.Test(t,func(t *testing.T){
-  times,posts:=0,0
-  var clock *AuthClock
-  c:=authenticatedClockTransport(t,func(r *http.Request)(*http.Response,error){
-   if r.URL.Path=="/time"{times++;return authClockResponse(r,200,strconv.FormatInt(time.Now().Unix(),10)),nil}
-   posts++;clock.Invalidate()
-   return nil,fmt.Errorf("synthetic outcome unknown after order attempt")
-  })
-  var err error
-  clock,err=c.NewServerAuthClock(testAuthClockPolicy());if err!=nil{t.Fatal(err)};defer clock.Close()
-  if err:=clock.Refresh(t.Context());err!=nil{t.Fatal(err)}
-  if err:=c.SetAuthClock(clock);err!=nil{t.Fatal(err)}
-  err=c.Post(t.Context(),"/order",nil,nil)
-  if err==nil{t.Fatal("unknown attempt ignored")}
-  if _,ok:=errors.AsType[*AuthClockNotReadyError](err);ok{t.Fatal("earlier order attempt incorrectly certified not sent")}
-  if times!=1||posts!=1{t.Fatal("clock failure fetched time or replayed order")}
- })
+	synctest.Test(t, func(t *testing.T) {
+		times, posts := 0, 0
+		var clock *AuthClock
+		c := authenticatedClockTransport(t, func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path == "/time" {
+				times++
+				return authClockResponse(r, 200, strconv.FormatInt(time.Now().Unix(), 10)), nil
+			}
+			posts++
+			clock.Invalidate()
+			return nil, fmt.Errorf("synthetic outcome unknown after order attempt")
+		})
+		var err error
+		clock, err = c.NewServerAuthClock(testAuthClockPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clock.Close()
+		if err := clock.Refresh(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetAuthClock(clock); err != nil {
+			t.Fatal(err)
+		}
+		err = c.Post(t.Context(), "/order", nil, nil)
+		if err == nil {
+			t.Fatal("unknown attempt ignored")
+		}
+		if _, ok := errors.AsType[*AuthClockNotReadyError](err); ok {
+			t.Fatal("earlier order attempt incorrectly certified not sent")
+		}
+		if times != 1 || posts != 1 {
+			t.Fatal("clock failure fetched time or replayed order")
+		}
+	})
 }
 
 func TestTransportAuthClockSourceRejectsRedirectOrOversize(t *testing.T) {
@@ -216,6 +262,27 @@ func TestTransportAuthClockPublicSourceDoesNotCarryCookieJar(t *testing.T) {
 		}
 		if client.Jar != jar || len(client.Jar.Cookies(origin)) != 1 {
 			t.Fatal("original client jar was mutated")
+		}
+	})
+}
+
+func TestTransportAuthClockClosedCloneCannotFallBack(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := authenticatedClockTransport(t, func(*http.Request) (*http.Response, error) {
+			t.Fatal("closed clone attempted HTTP fallback")
+			return nil, context.Canceled
+		})
+		clock, err := c.NewServerAuthClock(testAuthClockPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetAuthClock(clock); err != nil {
+			t.Fatal(err)
+		}
+		clock.Close()
+		err = c.Clone().Post(t.Context(), "/order", nil, nil)
+		if _, ok := errors.AsType[*AuthClockNotReadyError](err); !ok {
+			t.Fatal("closed clone lost strict no-send behavior")
 		}
 	})
 }

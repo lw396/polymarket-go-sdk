@@ -111,7 +111,7 @@ func recordOrderAuthTime(ctx context.Context, source string, reading *AuthClockR
 		return
 	}
 	switch source {
-	case "local", "server_time", "calibrated", "server_time_fallback", "server_time_failed":
+	case "local", "server_time", "calibrated", "clock_unavailable", "server_time_failed":
 	default:
 		source = "unknown"
 	}

@@ -8,17 +8,32 @@ import (
 	"time"
 )
 
-// SetAuthClock installs an optional same-origin server-time overlay. Configure
+// AuthClockNotReadyError certifies this Call made no HTTP request attempts.
+// It is never returned after an earlier attempt whose outcome may be unknown.
+// The cause is private so transport owns the no-send certification.
+type AuthClockNotReadyError struct{ cause error }
+
+func (e *AuthClockNotReadyError) Error() string {
+	return "calibrated authentication clock unavailable before request submission"
+}
+
+func (e *AuthClockNotReadyError) Unwrap() error {
+	return e.cause
+}
+
+// SetAuthClock installs a strict same-origin calibrated server clock. Configure
 // before concurrent use, like SetAuth. It only applies when UseServerTime is
 // enabled; disabling server time preserves the legacy local-clock behavior.
-// A nil clock removes the overlay. Caller owns Refresh and Close; requests do
-// not refresh calibration or replay on authentication rejection.
+// An unusable configured clock fails closed, without a live /time fallback.
+// A nil clock explicitly restores legacy SDK behavior. Caller owns Refresh and
+// Close; requests do not refresh calibration or replay on auth rejection.
 func (c *Client) SetAuthClock(clock *AuthClock) error {
 	if c == nil {
 		return ErrAuthClockUnavailable
 	}
 	if clock == nil {
 		c.authClock = nil
+		c.authClockConfigured = false
 		return nil
 	}
 	shared, err := clock.CloneForOrigin(c.baseURL)
@@ -26,6 +41,7 @@ func (c *Client) SetAuthClock(clock *AuthClock) error {
 		return err
 	}
 	c.authClock = shared
+	c.authClockConfigured = true
 	return nil
 }
 
@@ -80,20 +96,20 @@ func (c *Client) authTimestamp(ctx context.Context) (int64, error) {
 		recordOrderAuthTime(ctx, "local", nil)
 		return time.Now().Unix(), nil
 	}
-	source := "server_time"
-	if c.authClock != nil {
+	if c.authClockConfigured {
 		reading, err := c.authClock.Read(ctx)
 		if err == nil {
 			recordOrderAuthTime(ctx, "calibrated", &reading)
 			return reading.Timestamp, nil
 		}
-		source = "server_time_fallback"
+		recordOrderAuthTime(ctx, "clock_unavailable", nil)
+		return 0, err
 	}
 	timestamp, err := c.serverTime(ctx)
 	if err != nil {
 		recordOrderAuthTime(ctx, "server_time_failed", nil)
 		return 0, err
 	}
-	recordOrderAuthTime(ctx, source, nil)
+	recordOrderAuthTime(ctx, "server_time", nil)
 	return timestamp, nil
 }

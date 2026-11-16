@@ -14,7 +14,7 @@ import (
 )
 
 func TestOrderAuthTimeSourcesAndUnavailable(t *testing.T) {
-	for _, source := range []string{"local", "server_time", "calibrated", "server_time_fallback", "server_time_failed", "PRIVATE_SOURCE", ""} {
+	for _, source := range []string{"local", "server_time", "calibrated", "clock_unavailable", "server_time_failed", "PRIVATE_SOURCE", ""} {
 		t.Run(source, func(t *testing.T) {
 			ctx, c := WithOrderDiagnostics(t.Context())
 			recordOrderAuthTime(ctx, source, nil)
