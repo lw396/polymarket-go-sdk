@@ -13,6 +13,52 @@ import (
 	"time"
 )
 
+func TestOrderAuthTimeSourcesAndUnavailable(t *testing.T) {
+	for _, source := range []string{"local", "server_time", "calibrated", "server_time_fallback", "server_time_failed", "PRIVATE_SOURCE", ""} {
+		t.Run(source, func(t *testing.T) {
+			ctx, c := WithOrderDiagnostics(t.Context())
+			recordOrderAuthTime(ctx, source, nil)
+			got := c.Finish().AuthTime[0]
+			want := source
+			if source == "PRIVATE_SOURCE" || source == "" {
+				want = "unknown"
+			}
+			if got != (OrderAuthTime{Source: want, Age: -1, Uncertainty: -1, MaxPastSkew: -1, MaxFutureSkew: -1}) {
+				t.Fatalf("unsafe source or missing evidence became zero: %+v", got)
+			}
+		})
+	}
+	recordOrderAuthTime(nil, "local", nil)
+	recordOrderAuthTime(t.Context(), "local", nil)
+}
+
+func TestOrderAuthTimeBoundFreezeAndCopy(t *testing.T) {
+	ctx, c := WithOrderDiagnostics(t.Context())
+	reading := &AuthClockReading{Timestamp: 123456, RTT: 99, Age: 0, Uncertainty: 2, MaxPastSkew: 3, MaxFutureSkew: 4}
+	recordOrderAuthTime(ctx, "calibrated", reading)
+	reading.Age = 123
+	var wg sync.WaitGroup
+	for range 99 {
+		wg.Go(func() { recordOrderAuthTime(ctx, "local", nil) })
+	}
+	wg.Wait()
+	got := c.Finish()
+	want := OrderAuthTime{Source: "calibrated", Age: 0, Uncertainty: 2, MaxPastSkew: 3, MaxFutureSkew: 4}
+	if len(got.AuthTime) != 32 || got.DroppedAuthTime != 68 || got.AuthTime[0] != want {
+		t.Fatalf("unbounded, aliased or lost evidence: %+v", got)
+	}
+	got.AuthTime[0].Source = "mutated"
+	recordOrderAuthTime(ctx, "server_time_failed", nil)
+	frozen := c.Finish()
+	if len(frozen.AuthTime) != 32 || frozen.DroppedAuthTime != 68 || frozen.AuthTime[0] != want {
+		t.Fatalf("finish did not freeze or clone: %+v", frozen)
+	}
+	_, empty := WithOrderDiagnostics(t.Context())
+	if got := empty.Finish(); len(got.AuthTime) != 0 || got.DroppedAuthTime != 0 {
+		t.Fatalf("empty collector has evidence: %+v", got)
+	}
+}
+
 func TestOrderDiagnosticsTraceIsBoundedAndFrozen(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, collector := WithOrderDiagnostics(t.Context())

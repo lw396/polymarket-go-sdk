@@ -21,6 +21,15 @@ type OrderDiagnostics struct {
 	SigningCalls    int
 	HTTP            []OrderHTTPTime
 	DroppedHTTP     int
+	AuthTime        []OrderAuthTime
+	DroppedAuthTime int
+}
+
+// OrderAuthTime is bounded authentication-clock evidence, not authentication
+// success. It contains no timestamp or origin; -1 means unobserved.
+type OrderAuthTime struct {
+	Source                                       string
+	Age, Uncertainty, MaxPastSkew, MaxFutureSkew time.Duration
 }
 
 // OrderHTTPTime describes one SDK HTTP Do attempt, including its redirects and
@@ -83,7 +92,37 @@ func (c *OrderDiagnosticCollector) Finish() OrderDiagnostics {
 	c.closed = true
 	result := c.data
 	result.HTTP = slices.Clone(result.HTTP)
+	result.AuthTime = slices.Clone(result.AuthTime)
 	return result
+}
+
+func recordOrderAuthTime(ctx context.Context, source string, reading *AuthClockReading) {
+	c := diagnosticCollector(ctx)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	if len(c.data.AuthTime) >= 32 {
+		c.data.DroppedAuthTime++
+		return
+	}
+	switch source {
+	case "local", "server_time", "calibrated", "server_time_fallback", "server_time_failed":
+	default:
+		source = "unknown"
+	}
+	r := OrderAuthTime{Source: source, Age: -1, Uncertainty: -1, MaxPastSkew: -1, MaxFutureSkew: -1}
+	if reading != nil {
+		r.Age = reading.Age
+		r.Uncertainty = reading.Uncertainty
+		r.MaxPastSkew = reading.MaxPastSkew
+		r.MaxFutureSkew = reading.MaxFutureSkew
+	}
+	c.data.AuthTime = append(c.data.AuthTime, r)
 }
 
 func RecordTickCache(ctx context.Context, hit bool) {

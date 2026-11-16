@@ -47,6 +47,7 @@ type Client struct {
 	apiKey         *auth.APIKey
 	builder        *auth.BuilderConfig
 	useServerTime  bool
+	authClock      *AuthClock // Optional, caller-owned server-time overlay.
 	rateLimiter    *RateLimiter
 	circuitBreaker *CircuitBreaker
 }
@@ -111,6 +112,11 @@ func (c *Client) CloneWithBaseURL(baseURL string) *Client {
 	clone := NewClient(c.httpClient, baseURL)
 	clone.userAgent = c.userAgent
 	clone.useServerTime = c.useServerTime
+	if c.authClock != nil {
+		// Cross-origin/closed clones keep live server time, never another
+		// origin's calibration. Transport clones do not own Close.
+		clone.authClock, _ = c.authClock.CloneForOrigin(baseURL)
+	}
 	clone.signer = c.signer
 	clone.apiKey = c.apiKey
 	clone.builder = c.builder
@@ -271,14 +277,10 @@ func (c *Client) doCall(ctx context.Context, method, path string, query url.Valu
 		// L2 Authentication (only if no custom auth headers provided)
 		// If custom POLY_SIGNATURE is provided, skip auto-L2 auth
 		if c.apiKey != nil && c.signer != nil && req.Header.Get(auth.HeaderPolySignature) == "" {
-			ts := time.Now().Unix()
-			if c.useServerTime {
-				serverTime, err := c.serverTime(ctx)
-				if err != nil {
-					lastErr = fmt.Errorf("failed to get server time: %w", err)
-					continue
-				}
-				ts = serverTime
+			ts, err := c.authTimestamp(ctx)
+			if err != nil {
+				lastErr = fmt.Errorf("failed to get server time: %w", err)
+				continue
 			}
 			signPath := "/" + strings.TrimLeft(path, "/")
 
